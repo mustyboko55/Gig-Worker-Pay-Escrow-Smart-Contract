@@ -6,6 +6,9 @@
 (define-constant ERR-ALREADY-EXISTS (err u104))
 (define-constant ERR-TIMEOUT-NOT-REACHED (err u105))
 (define-constant ERR-INVALID-PROOF (err u106))
+(define-constant ERR-INVALID-RATING (err u107))
+(define-constant ERR-FEEDBACK-ALREADY-EXISTS (err u108))
+(define-constant ERR-INVALID-PARTICIPANT (err u109))
 
 (define-data-var next-escrow-id uint u1)
 (define-data-var contract-fee uint u250)
@@ -23,6 +26,14 @@
 })
 
 (define-map user-balances principal uint)
+
+;; Feedback system - stores ratings and comments from employers and workers
+(define-map escrow-feedback {escrow-id: uint, participant-type: (string-ascii 8)} {
+    rating: uint,
+    comment: (optional (string-ascii 256)),
+    feedback-date: uint,
+    reviewer: principal
+})
 
 (define-private (get-escrow-state (escrow-id uint))
     (get state (map-get? escrows escrow-id))
@@ -67,6 +78,32 @@
                 (ok true)
             )
             ERR-INSUFFICIENT-FUNDS
+        )
+    )
+)
+
+;; Helper functions for feedback system
+(define-private (is-escrow-finalized (escrow-id uint))
+    (match (get-escrow-state escrow-id)
+        state (or 
+            (is-eq state "completed")
+            (is-eq state "auto-completed")
+            (is-eq state "resolved")
+        )
+        false
+    )
+)
+
+(define-private (is-valid-rating (rating uint))
+    (and (>= rating u1) (<= rating u5))
+)
+
+(define-private (get-participant-type (escrow-id uint) (user principal))
+    (if (is-employer escrow-id user)
+        "employer"
+        (if (is-worker escrow-id user)
+            "worker"
+            "none"
         )
     )
 )
@@ -244,6 +281,37 @@
     )
 )
 
+;; Submit feedback for a completed escrow
+(define-public (submit-feedback (escrow-id uint) (rating uint) (comment (optional (string-ascii 256))))
+    (let (
+        (escrow (unwrap! (map-get? escrows escrow-id) ERR-NOT-FOUND))
+        (participant-type (get-participant-type escrow-id tx-sender))
+        (existing-feedback (map-get? escrow-feedback {escrow-id: escrow-id, participant-type: participant-type}))
+    )
+        ;; Validate escrow exists and is finalized
+        (asserts! (is-escrow-finalized escrow-id) ERR-INVALID-STATE)
+        
+        ;; Validate sender is a participant (employer or worker)
+        (asserts! (not (is-eq participant-type "none")) ERR-INVALID-PARTICIPANT)
+        
+        ;; Validate rating is within 1-5 range
+        (asserts! (is-valid-rating rating) ERR-INVALID-RATING)
+        
+        ;; Ensure feedback hasn't already been submitted by this participant
+        (asserts! (is-none existing-feedback) ERR-FEEDBACK-ALREADY-EXISTS)
+        
+        ;; Store the feedback
+        (map-set escrow-feedback {escrow-id: escrow-id, participant-type: participant-type} {
+            rating: rating,
+            comment: comment,
+            feedback-date: stacks-block-height,
+            reviewer: tx-sender
+        })
+        
+        (ok true)
+    )
+)
+
 (define-read-only (get-escrow (escrow-id uint))
     (map-get? escrows escrow-id)
 )
@@ -286,4 +354,22 @@
         )
         false
     )
+)
+
+;; Get feedback for a specific escrow (returns both employer and worker feedback if available)
+(define-read-only (get-feedback (escrow-id uint))
+    (let (
+        (employer-feedback (map-get? escrow-feedback {escrow-id: escrow-id, participant-type: "employer"}))
+        (worker-feedback (map-get? escrow-feedback {escrow-id: escrow-id, participant-type: "worker"}))
+    )
+        {
+            employer-feedback: employer-feedback,
+            worker-feedback: worker-feedback
+        }
+    )
+)
+
+;; Get feedback for a specific participant type on an escrow
+(define-read-only (get-participant-feedback (escrow-id uint) (participant-type (string-ascii 8)))
+    (map-get? escrow-feedback {escrow-id: escrow-id, participant-type: participant-type})
 )
